@@ -1,0 +1,119 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: new-ci-cd-pipeline
+spec:
+  params:
+    - name: app-name
+      type: string
+
+    - name: build-image
+      type: string
+
+    - name: repo-url
+      type: string
+
+    - name: branch
+      type: string
+      default: main
+
+  workspaces:
+    - name: output
+    - name: dockerconfig
+
+  tasks:
+
+    - name: cleanup
+      taskRef:
+        name: cleanup
+        kind: Task
+      workspaces:
+        - name: source
+          workspace: output
+
+    - name: git-clone
+      taskRef:
+        name: git-clone
+        kind: ClusterTask
+      workspaces:
+        - name: output
+          workspace: output
+      params:
+        - name: url
+          value: $(params.repo-url)
+        - name: revision
+          value: $(params.branch)
+      runAfter:
+        - cleanup
+
+    - name: flake8
+      taskRef:
+        name: flake8
+        kind: Task
+      workspaces:
+        - name: source
+          workspace: output
+      params:
+        - name: image
+          value: python:3.9-slim
+        - name: path
+          value: .
+        - name: requirements_file
+          value: requirements.txt
+        - name: args
+          value:
+            - "--count"
+            - "--max-complexity=10"
+            - "--max-line-length=127"
+      runAfter:
+        - git-clone
+
+    - name: nose
+      taskRef:
+        name: nose
+        kind: Task
+      workspaces:
+        - name: source
+          workspace: output
+      params:
+        - name: args
+          value: "-v"
+      runAfter:
+        - flake8
+
+    - name: buildah
+      taskRef:
+        name: buildah
+        kind: ClusterTask
+      workspaces:
+        - name: source
+          workspace: output
+        - name: dockerconfig
+          workspace: dockerconfig
+      params:
+        - name: IMAGE
+          value: $(params.build-image)
+        - name: DOCKERFILE
+          value: ./Dockerfile
+        - name: CONTEXT
+          value: .
+        - name: TLSVERIFY
+          value: "true"
+        - name: FORMAT
+          value: oci
+        - name: SKIP_PUSH
+          value: "false"
+      runAfter:
+        - nose
+
+    - name: deploy
+      taskRef:
+        name: openshift-client
+        kind: ClusterTask
+      params:
+        - name: SCRIPT
+          value: "oc create deployment $(params.app-name) --image=$(params.build-image) --dry-run=client -o yaml | oc apply -f -"
+        - name: VERSION
+          value: latest
+      runAfter:
+        - buildah
